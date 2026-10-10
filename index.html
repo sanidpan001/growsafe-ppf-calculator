@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GrowSafe — PPF Calculator with Year-by-Year Growth Story</title>
+<meta name="description" content="GrowSafe is a free PPF Calculator that shows your Public Provident Fund balance year by year, marks loan and partial-withdrawal eligibility, and compares 5-year extension scenarios with and without fresh contributions.">
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  body{font-family:'Inter',system-ui,sans-serif;background:#FDF8EC;color:#1C2A1E}
+  .font-display{font-family:'Fraunces',Georgia,serif}
+  .leaf-card{background:#FFFDF6;border:1px solid #E7DFC8;border-radius:1.25rem;box-shadow:0 10px 30px -18px rgba(20,83,45,.35)}
+  input[type=range]{accent-color:#166534}
+  .num{font-variant-numeric:tabular-nums}
+  .badge-loan{background:#FEF3C7;color:#92400E;border:1px solid #F59E0B}
+  .badge-wd{background:#DCFCE7;color:#166534;border:1px solid #22C55E}
+  details.faq summary{cursor:pointer}
+  details.faq summary::-webkit-details-marker{display:none}
+  .story-line{background:linear-gradient(#BBF7D0,#166534)}
+  @media (max-width:640px){ .tbl-wrap{overflow-x:auto} table{min-width:640px} }
+</style>
+<script id="lib-growsafe">
+var GrowSafeLib = (function () {
+  'use strict';
+  var DEFAULT_RATE = 7.1;
+  var MAX_ANNUAL_DEPOSIT = 150000;
+  var MIN_ANNUAL_DEPOSIT = 500;
+  var MIN_TENURE = 15;
+  var LOAN_FROM_YEAR = 3;   // loan facility opens in the 3rd account year
+  var LOAN_TO_YEAR = 6;     // and closes at the end of the 6th account year
+  var WITHDRAWAL_FROM_YEAR = 7; // partial withdrawals allowed from the 7th year
+
+  function round2(n) { return Math.round(n * 100) / 100; }
+
+  function validateInputs(o) {
+    var errors = [];
+    o = o || {};
+    var amount = o.amount, rate = o.rate, years = o.years;
+    if (amount === null || amount === undefined || amount === '' || isNaN(Number(amount))) {
+      errors.push('Enter a deposit amount.');
+    } else if (Number(amount) <= 0) {
+      errors.push('Deposit amount must be greater than zero.');
+    }
+    if (rate === null || rate === undefined || rate === '' || isNaN(Number(rate))) {
+      errors.push('Enter an interest rate.');
+    } else if (Number(rate) < 0 || Number(rate) > 30) {
+      errors.push('Interest rate must be between 0% and 30%.');
+    }
+    if (years === null || years === undefined || isNaN(Number(years)) || Number(years) < 1) {
+      errors.push('Choose a tenure of at least 1 year.');
+    }
+    return errors;
+  }
+
+  // Annual deposit implied by the user's chosen frequency.
+  function annualDeposit(amount, frequency) {
+    var a = Number(amount) || 0;
+    return frequency === 'monthly' ? a * 12 : a;
+  }
+
+  // True when the annual deposit breaches the statutory Rs 1.5 lakh cap.
+  function exceedsCap(annual) { return Number(annual) > MAX_ANNUAL_DEPOSIT; }
+
+  /*
+   * Year-by-year schedule. Model: the full annual deposit is credited at the
+   * start of each financial year (the "deposit before the 5th of April"
+   * best-practice case), so interest for a year = (opening + deposit) * rate.
+   * Loan eligibility: account years 3-6; max loan = 25% of the closing
+   * balance two years earlier. Partial withdrawal: from year 7; max =
+   * 50% of the closing balance four years earlier.
+   */
+  function computeSchedule(o) {
+    var errors = validateInputs(o);
+    if (errors.length) return { errors: errors, rows: [], summary: null };
+    var annual = annualDeposit(o.amount, o.frequency);
+    var rate = Number(o.rate) / 100;
+    var years = Math.floor(Number(o.years));
+    var startYear = Math.floor(Number(o.startYear)) || 2026;
+    var rows = [];
+    var balance = 0, totalDeposited = 0, totalInterest = 0;
+    for (var i = 1; i <= years; i++) {
+      var opening = balance;
+      var interest = round2((opening + annual) * rate);
+      var closing = round2(opening + annual + interest);
+      totalDeposited += annual;
+      totalInterest = round2(totalInterest + interest);
+      var loanEligible = i >= LOAN_FROM_YEAR && i <= LOAN_TO_YEAR;
+      var withdrawalEligible = i >= WITHDRAWAL_FROM_YEAR;
+      var maxLoan = 0, maxWithdrawal = 0;
+      if (loanEligible && i - 2 >= 1) maxLoan = round2(0.25 * rows[i - 3].closing);
+      if (loanEligible && i === LOAN_FROM_YEAR) maxLoan = round2(0.25 * rows[0].closing);
+      if (withdrawalEligible && i - 4 >= 1) maxWithdrawal = round2(0.5 * rows[i - 5].closing);
+      if (withdrawalEligible && i === WITHDRAWAL_FROM_YEAR) maxWithdrawal = round2(0.5 * rows[2].closing);
+      rows.push({
+        accountYear: i,
+        calendarYear: startYear + i - 1,
+        opening: round2(opening),
+        deposited: round2(annual),
+        interest: interest,
+        closing: closing,
+        cumulativeDeposited: round2(totalDeposited),
+        loanEligible: loanEligible,
+        withdrawalEligible: withdrawalEligible,
+        maxLoan: maxLoan,
+        maxWithdrawal: maxWithdrawal
+      });
+      balance = closing;
+    }
+    return {
+      errors: [],
+      rows: rows,
+      summary: {
+        maturityValue: round2(balance),
+        totalDeposited: round2(totalDeposited),
+        totalInterest: round2(totalInterest),
+        annualDeposit: round2(annual),
+        years: years
+      }
+    };
+  }
+
+  /*
+   * One 5-year extension block (or any block length) from a starting balance.
+   * withContributions=true keeps depositing `annual` each year; false lets
+   * the existing balance compound on its own.
+   */
+  function extensionScenario(startBalance, ratePct, annual, blockYears, withContributions) {
+    var balance = Number(startBalance) || 0;
+    var rate = (Number(ratePct) || 0) / 100;
+    var dep = withContributions ? (Number(annual) || 0) : 0;
+    var n = Math.max(0, Math.floor(Number(blockYears) || 0));
+    var deposited = 0, interestTotal = 0;
+    for (var i = 0; i < n; i++) {
+      var interest = round2((balance + dep) * rate);
+      balance = round2(balance + dep + interest);
+      deposited += dep;
+      interestTotal = round2(interestTotal + interest);
+    }
+    return {
+      finalBalance: round2(balance),
+      totalDeposited: round2(deposited),
+      interestEarned: round2(interestTotal),
+      years: n,
+      withContributions: !!withContributions
+    };
+  }
+
+  function formatINR(n) {
+    var num = Math.round(Number(n) || 0);
+    var neg = num < 0;
+    var s = String(Math.abs(num));
+    var last3 = s.slice(-3);
+    var rest = s.slice(0, -3);
+    var out = rest ? rest.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + last3 : last3;
+    return (neg ? '-₹' : '₹') + out;
+  }
+
+  return {
+    DEFAULT_RATE: DEFAULT_RATE,
+    MAX_ANNUAL_DEPOSIT: MAX_ANNUAL_DEPOSIT,
+    MIN_ANNUAL_DEPOSIT: MIN_ANNUAL_DEPOSIT,
+    MIN_TENURE: MIN_TENURE,
+    LOAN_FROM_YEAR: LOAN_FROM_YEAR,
+    LOAN_TO_YEAR: LOAN_TO_YEAR,
+    WITHDRAWAL_FROM_YEAR: WITHDRAWAL_FROM_YEAR,
+    round2: round2,
+    validateInputs: validateInputs,
+    annualDeposit: annualDeposit,
+    exceedsCap: exceedsCap,
+    computeSchedule: computeSchedule,
+    extensionScenario: extensionScenario,
+    formatINR: formatINR
+  };
+})();
+if (typeof module !== 'undefined' && module.exports) { module.exports = GrowSafeLib; }
+
+</script>
+</head>
+<body id="top" class="antialiased">
+
+<header class="sticky top-0 z-40 bg-[#14532D] text-[#FDF8EC] shadow-md">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6 h-16 flex items-center justify-between">
+    <a href="#top" class="flex items-center gap-2 font-display text-2xl font-extrabold tracking-tight">
+      <span aria-hidden="true" class="inline-flex items-center justify-center w-9 h-9 rounded-full bg-[#FDF8EC] text-[#14532D] text-lg">🌱</span>
+      GrowSafe
+    </a>
+    <nav class="flex items-center gap-5 text-sm font-medium">
+      <a href="#top" class="hover:text-[#BBF7D0] transition-colors">Home</a>
+      <a href="https://fixoraa.tech" class="hover:text-[#BBF7D0] transition-colors">More Tools</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- HERO: the growth story begins -->
+  <section class="mx-auto max-w-6xl px-4 sm:px-6 pt-10 pb-4 text-center">
+    <p class="text-xs font-semibold tracking-[0.22em] uppercase text-[#166534]">Chapter One · The Seed</p>
+    <h1 class="font-display text-4xl sm:text-5xl font-extrabold text-[#14532D] mt-3 leading-tight">Your money, planted once,<br class="hidden sm:block"> grown safely for fifteen years.</h1>
+    <p class="mt-4 max-w-2xl mx-auto text-base sm:text-lg text-[#3F5544]">GrowSafe is a PPF Calculator that does not just hand you a final number. It tells the whole growth story of your Public Provident Fund — every year's balance, the years a loan opens up, the years you may withdraw, and what happens if you extend the account for five more years.</p>
+    <span class="inline-block mt-5 px-4 py-1.5 rounded-full bg-[#166534] text-[#FDF8EC] text-sm font-semibold shadow">✦ Unlimited Free Usage</span>
+  </section>
+
+<div class="no-print mx-auto max-w-6xl px-4 sm:px-6 pt-4" role="complementary" aria-label="Advertisement">
+  <div class="mx-auto text-center" style="max-width:728px">
+    <span class="block text-[10px] tracking-[0.18em] uppercase text-slate-400 mb-1.5">Advertisement</span>
+    <div class="flex justify-center overflow-hidden">
+      <div class="origin-top scale-[0.44] sm:scale-100 shrink-0">
+        <script>
+          atOptions = { 'key' : '4e68ac77881c17fe128a46565d9a4e8c', 'format' : 'iframe', 'height' : 90, 'width' : 728, 'params' : {} };
+        </script>
+        <script src="https://www.highrevenueformat.com/4e68ac77881c17fe128a46565d9a4e8c/invoke.js"></script>
+      </div>
+    </div>
+  </div>
+</div>
+
+  <!-- CALCULATOR -->
+  <section class="mx-auto max-w-6xl px-4 sm:px-6 py-8" aria-label="PPF Calculator">
+    <div class="leaf-card p-5 sm:p-8">
+      <h2 class="font-display text-2xl sm:text-3xl font-bold text-[#14532D]">Plant your numbers</h2>
+      <p class="text-sm text-[#3F5544] mt-1">Tell GrowSafe what you will deposit, and watch the sapling grow below. Everything is calculated in your browser — nothing is uploaded anywhere.</p>
+
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5 mt-6">
+        <div>
+          <label for="freq" class="block text-sm font-semibold text-[#14532D]">Deposit frequency</label>
+          <select id="freq" class="mt-1.5 w-full rounded-lg border border-[#CBD5B8] bg-white px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#166534]">
+            <option value="monthly" selected>Monthly deposit</option>
+            <option value="yearly">Yearly deposit</option>
+          </select>
+        </div>
+        <div>
+          <label for="amount" class="block text-sm font-semibold text-[#14532D]">Deposit amount (₹)</label>
+          <input id="amount" type="number" min="0" step="any" value="12500" class="mt-1.5 w-full rounded-lg border border-[#CBD5B8] bg-white px-3 py-2.5 num focus:outline-none focus:ring-2 focus:ring-[#166534]" placeholder="e.g. 12500">
+          <p id="amountHint" class="text-xs text-[#5B7263] mt-1">₹12,500 a month = ₹1,50,000 a year, the current maximum.</p>
+        </div>
+        <div>
+          <label for="rate" class="block text-sm font-semibold text-[#14532D]">Interest rate (% per year)</label>
+          <input id="rate" type="number" min="0" max="30" step="0.1" value="7.1" class="mt-1.5 w-full rounded-lg border border-[#CBD5B8] bg-white px-3 py-2.5 num focus:outline-none focus:ring-2 focus:ring-[#166534]">
+          <input id="rateRange" type="range" min="5" max="10" step="0.1" value="7.1" class="w-full mt-2" aria-label="Interest rate slider">
+          <p class="text-xs text-[#5B7263]">The government revises the PPF rate every quarter; 7.1% is the long-running recent rate.</p>
+        </div>
+        <div>
+          <label for="years" class="block text-sm font-semibold text-[#14532D]">Tenure (years)</label>
+          <select id="years" class="mt-1.5 w-full rounded-lg border border-[#CBD5B8] bg-white px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-[#166534]">
+            <option value="15" selected>15 years (standard maturity)</option>
+            <option value="20">20 years (15 + one extension)</option>
+            <option value="25">25 years (15 + two extensions)</option>
+            <option value="30">30 years (15 + three extensions)</option>
+          </select>
+          <label for="startYear" class="block text-sm font-semibold text-[#14532D] mt-4">Account opened in (year)</label>
+          <input id="startYear" type="number" min="1990" max="2100" step="1" value="2026" class="mt-1.5 w-full rounded-lg border border-[#CBD5B8] bg-white px-3 py-2.5 num focus:outline-none focus:ring-2 focus:ring-[#166534]">
+        </div>
+      </div>
+
+      <p id="warn" class="hidden mt-5 rounded-lg bg-[#FEF3C7] border border-[#F59E0B] text-[#92400E] px-4 py-3 text-sm font-medium" role="alert"></p>
+      <p id="err" class="hidden mt-5 rounded-lg bg-[#FEE2E2] border border-[#EF4444] text-[#991B1B] px-4 py-3 text-sm font-medium" role="alert"></p>
+
+      <div class="mt-6 flex flex-wrap gap-3">
+        <button id="calcBtn" class="px-6 py-3 rounded-full bg-[#166534] text-white font-semibold shadow hover:bg-[#14532D] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[#166534] transition-colors">🌿 Grow my projection</button>
+        <button id="maxBtn" class="px-6 py-3 rounded-full bg-white border-2 border-[#166534] text-[#14532D] font-semibold hover:bg-[#F0FDF4] focus:outline-none focus:ring-2 focus:ring-[#166534] transition-colors">Set maximum ₹1.5 lakh/year</button>
+      </div>
+
+      <!-- RESULTS -->
+      <div id="results" class="mt-8">
+        <div class="grid sm:grid-cols-3 gap-4">
+          <div class="rounded-xl bg-[#14532D] text-[#FDF8EC] p-5">
+            <p class="text-xs uppercase tracking-widest opacity-80">Maturity value</p>
+            <p id="maturityOut" class="num font-display text-3xl font-bold mt-1">—</p>
+          </div>
+          <div class="rounded-xl bg-[#F0FDF4] border border-[#BBF7D0] p-5">
+            <p class="text-xs uppercase tracking-widest text-[#166534]">You deposit</p>
+            <p id="depositedOut" class="num font-display text-3xl font-bold mt-1 text-[#14532D]">—</p>
+          </div>
+          <div class="rounded-xl bg-[#FFFBEB] border border-[#FDE68A] p-5">
+            <p class="text-xs uppercase tracking-widest text-[#92400E]">Interest grown for you</p>
+            <p id="interestOut" class="num font-display text-3xl font-bold mt-1 text-[#92400E]">—</p>
+          </div>
+        </div>
+        <p id="emptyState" class="mt-4 text-sm text-[#5B7263]">Press <strong>Grow my projection</strong> and your year-by-year story, growth curve and extension choices will appear here.</p>
+
+        <!-- Growth curve -->
+        <div id="chartWrap" class="hidden mt-6">
+          <h3 class="font-display text-xl font-bold text-[#14532D]">Chapter Two · The Climb</h3>
+          <p class="text-sm text-[#3F5544]">Watch compounding bend the curve upward — the later years add more interest than the early years, even though your deposit never changes.</p>
+          <div id="chart" class="mt-3 rounded-xl border border-[#E7DFC8] bg-white p-3"></div>
+        </div>
+
+        <!-- Year by year table -->
+        <div id="tableWrap" class="hidden mt-8">
+          <h3 class="font-display text-xl font-bold text-[#14532D]">Chapter Three · Every Ring of the Trunk</h3>
+          <p class="text-sm text-[#3F5544] mt-1">Each row is one financial year of your account. Badges mark the years the PPF rulebook opens new doors: <span class="badge-loan inline-block px-2 py-0.5 rounded-full text-xs font-semibold">Loan window</span> in years 3–6, and <span class="badge-wd inline-block px-2 py-0.5 rounded-full text-xs font-semibold">Withdrawal open</span> from year 7 onwards.</p>
+          <div class="tbl-wrap mt-3 rounded-xl border border-[#E7DFC8] overflow-hidden">
+            <table class="w-full text-sm num">
+              <thead class="bg-[#14532D] text-[#FDF8EC]">
+                <tr>
+                  <th class="text-left px-3 py-2.5 font-semibold">Year</th>
+                  <th class="text-right px-3 py-2.5 font-semibold">Opening</th>
+                  <th class="text-right px-3 py-2.5 font-semibold">Deposited</th>
+                  <th class="text-right px-3 py-2.5 font-semibold">Interest</th>
+                  <th class="text-right px-3 py-2.5 font-semibold">Closing</th>
+                  <th class="text-left px-3 py-2.5 font-semibold">Eligibility</th>
+                </tr>
+              </thead>
+              <tbody id="tableBody"></tbody>
+            </table>
+          </div>
+          <p class="text-xs text-[#5B7263] mt-2">Model note: GrowSafe credits your full annual deposit at the start of each financial year — the best-practice pattern of depositing before 5 April — so each year's interest is calculated on the opening balance plus that year's deposit. A loan can reach up to 25% of the balance two years earlier; a partial withdrawal up to 50% of the balance four years earlier. Exact figures are shown when you hover or read the eligibility text in each row.</p>
+        </div>
+
+        <!-- Extensions -->
+        <div id="extWrap" class="hidden mt-8">
+          <h3 class="font-display text-xl font-bold text-[#14532D]">Chapter Four · Let It Grow Longer?</h3>
+          <p class="text-sm text-[#3F5544] mt-1">At maturity a PPF account can be extended in blocks of five years — either you keep depositing, or you simply let the existing balance keep compounding. Here is the fork in the path, side by side:</p>
+          <div class="grid sm:grid-cols-2 gap-4 mt-4">
+            <div class="rounded-xl bg-[#F0FDF4] border-2 border-[#166534] p-5">
+              <p class="font-display text-lg font-bold text-[#14532D]">🌳 Extend &amp; keep depositing</p>
+              <p id="extWithOut" class="num text-2xl font-bold text-[#166534] mt-2">—</p>
+              <p id="extWithDetail" class="text-sm text-[#3F5544] mt-1"></p>
+            </div>
+            <div class="rounded-xl bg-white border-2 border-[#CBD5B8] p-5">
+              <p class="font-display text-lg font-bold text-[#14532D]">🍃 Extend &amp; deposit nothing</p>
+              <p id="extWithoutOut" class="num text-2xl font-bold text-[#14532D] mt-2">—</p>
+              <p id="extWithoutDetail" class="text-sm text-[#3F5544] mt-1"></p>
+            </div>
+          </div>
+          <p id="extVerdict" class="mt-3 text-sm font-medium text-[#14532D]"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+<div class="no-print mx-auto max-w-6xl px-4 sm:px-6 pb-4" role="complementary" aria-label="Advertisement">
+  <div class="mx-auto text-center" style="max-width:728px">
+    <span class="block text-[10px] tracking-[0.18em] uppercase text-slate-400 mb-1.5">Advertisement</span>
+    <div class="flex justify-center overflow-hidden">
+      <script async src="https://js.wpadmngr.com/static/adManager.js" data-admpid="464498"></script>
+    </div>
+  </div>
+</div>
+
+  <!-- ARTICLE -->
+  <article id="article" class="mx-auto max-w-4xl px-4 sm:px-6 py-10">
+    <h2 class="font-display text-3xl font-bold text-[#14532D]">The GrowSafe Guide to the Public Provident Fund</h2>
+    <p class="mt-4 leading-7">The Public Provident Fund, almost always shortened to PPF, is one of the oldest and most trusted long-term savings schemes in India. It was launched in 1968 by the National Savings Institute of the Ministry of Finance with a simple promise: give ordinary savers a safe place to build a retirement corpus, back it with a sovereign guarantee, and reward patience with tax-free interest. More than five decades later, that promise still holds, and the PPF remains the quiet backbone of millions of household balance sheets. This guide explains how the scheme works, how its interest is really calculated, when you can borrow against it or withdraw from it, and how to use the GrowSafe PPF Calculator above to plan your own fifteen-year growth story.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">Why the PPF still earns its place</h3>
+    <p class="mt-3 leading-7">Three features make the PPF unusual among savings products. First, safety: every rupee in a PPF account is backed by the Government of India, so the risk of losing your principal is as close to zero as any financial product can offer. Second, tax treatment: the PPF enjoys what accountants call EEE status — deposits qualify for a deduction under Section 80C of the Income Tax Act (up to the overall ₹1.5 lakh limit, under the old tax regime), the interest earned every year is completely tax-free, and the entire maturity amount is tax-free too. Very few instruments in India offer all three exemptions at once. Third, discipline: the fifteen-year lock-in sounds like a restriction, but for most savers it is the feature that actually builds wealth, because it stops the corpus from being raided for every short-term temptation.</p>
+    <p class="mt-3 leading-7">The interest rate is not fixed for the whole tenure. The government reviews small-savings rates every quarter and announces a rate for the coming three months. In recent years the PPF rate has held steady at 7.1% per year, but older savers remember rates above 8%, and the rate your money earns will drift up or down with the broader interest-rate cycle. That is exactly why the GrowSafe calculator lets you change the rate: run the numbers at 7.1% for today's reality, then test 6.8% or 7.5% to see how sensitive your final corpus is to the rate the government sets over the coming decade and a half.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">The rules of the account, in plain language</h3>
+    <p class="mt-3 leading-7">Any resident Indian can open one PPF account, at a post office or a bank, and a parent or guardian can open one on behalf of a minor child — though the combined deposits across a guardian's own account and all minor accounts they manage must stay within the annual ceiling. That ceiling is ₹1,50,000 per financial year, and the floor is just ₹500 per year to keep the account active. You may deposit in one lump sum or in instalments — up to twelve a year — in any amounts you like, as long as each deposit is a multiple of ₹50 and the yearly total stays inside the limit. Deposits above ₹1.5 lakh in a year earn no interest on the excess and must not be made, which is why GrowSafe warns you the moment your monthly plan crosses the cap: ₹12,500 a month lands exactly on ₹1.5 lakh a year, but ₹13,000 a month overshoots it.</p>
+    <p class="mt-3 leading-7">The account matures after fifteen complete financial years, counted from the end of the financial year in which you opened it. So an account opened any time in, say, the 2026–27 financial year matures on 1 April 2042, regardless of whether your first deposit was made in April or in March. At maturity you have three choices: withdraw everything and close the account, extend the account for a block of five years while continuing to deposit, or extend it for five years without any fresh deposits while the balance keeps earning interest. You can repeat those five-year extensions again and again — some savers keep a PPF account growing for thirty or forty years, turning a modest habit into the single largest asset they own. The extension comparison in GrowSafe shows both forks of that decision with your own numbers, because the difference between extending with deposits and extending without is often larger than people expect.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">How PPF interest is actually calculated</h3>
+    <p class="mt-3 leading-7">PPF interest has a quirk that catches many savers by surprise. Interest is calculated every month, but on the lowest balance in the account between the 5th day and the last day of that month, and the accumulated interest is credited to the account only once a year, on 31 March. The practical lesson is famous among experienced PPF savers: always deposit before the 5th of the month. A deposit made on the 3rd counts towards that month's interest calculation; the same deposit made on the 7th misses the month entirely and only starts earning from the next month. Over a single month the difference is small, but repeated twelve times a year for fifteen years it becomes real money.</p>
+    <p class="mt-3 leading-7">The GrowSafe model keeps the arithmetic transparent. It credits your full annual deposit at the start of the financial year — equivalent to the tidy habit of depositing early in April, or monthly before the 5th — and applies the annual rate to the opening balance plus that year's deposit. That is the standard way PPF calculators present projections, and it matches how a disciplined depositor's account actually behaves. If you habitually deposit late in the month, treat the projection as a gentle best case and, better still, take it as a nudge to move your deposit date earlier: the calculator is showing you what good timing is worth.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">Loans and partial withdrawals: the safety valves</h3>
+    <p class="mt-3 leading-7">A fifteen-year commitment would be frightening if the money were completely sealed away, so the scheme builds in two safety valves, and GrowSafe marks both of them directly on your year-by-year table. The first is a loan facility, available from the third financial year of the account until the end of the sixth year. You may borrow up to 25% of the balance that stood in your account at the end of the second year before the year you apply. The interest charged is modest — just 1% per year above the PPF rate — but the principal must be repaid within 36 months, and until it is, the loan portion of your balance earns no interest. The second valve is the partial withdrawal, available from the seventh financial year onwards, once per year. You may withdraw up to 50% of the balance at the end of the fourth year before the withdrawal year, and the withdrawal itself is completely tax-free. Withdrawals are meant for genuine needs — a child's education, a medical expense, a home purchase — and because the withdrawn amount stops compounding, GrowSafe shows the exact maximum the rulebook allows in every eligible year so you can weigh the cost before you touch the account.</p>
+    <p class="mt-3 leading-7">Notice the choreography: for the first two years the account simply grows; in years three to six a loan is the only exit; from year seven the withdrawal window opens and the loan window closes. Planners who know this rhythm often time their deposits accordingly — for example, slowing fresh deposits in the years just before a known expense, since the withdrawal ceiling is based on the balance four years earlier, or deliberately building the balance early so that both the loan ceiling and the later withdrawal ceiling are as generous as possible.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">Reading your GrowSafe projection like a story</h3>
+    <p class="mt-3 leading-7">Scroll back up to your results and read the table from top to bottom. In the early years the interest column looks almost disappointingly small — that is normal, and it is the phase where most savers give up on long-term schemes. Somewhere around the middle of the table the interest earned in a single year overtakes a large share of what you deposit, and by the final years the account is effectively paying you a second salary of interest every year. This is compounding doing its slow, then suddenly dramatic, work: interest earns interest on interest, and time is the ingredient that cannot be bought later. The growth curve above the table draws the same story as a picture — a gentle slope that bends steadily upward.</p>
+    <p class="mt-3 leading-7">Try three experiments with the calculator. First, keep the deposit fixed and stretch the tenure from fifteen to twenty or twenty-five years: notice that the extra five-year blocks add far more than the first five years did, because they compound on a much bigger base. Second, halve the deposit and watch the maturity value — it falls, but usually by less than half of the interest drama you feared, because starting early still matters more than depositing big. Third, nudge the interest rate down to 6.5% and up to 7.8%: you will see that even a full percentage point of rate changes the outcome less than the decision to extend the account. The levers you control — starting now, depositing regularly, and staying invested longer — are stronger than the lever you do not control, the quarterly rate announcement.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">PPF versus the alternatives</h3>
+    <p class="mt-3 leading-7">How does the PPF compare with the other homes for long-term money? A bank fixed deposit is simpler and fully liquid after its term, but its interest is taxed at your slab rate every year, which quietly shaves one to two percentage points off the effective return for taxpayers in the higher brackets, and no mainstream deposit currently matches the PPF's combination of sovereign safety and tax-free compounding. Equity mutual funds, especially through a monthly SIP, have historically delivered higher long-run returns than 7.1%, but they carry market risk, their gains are taxed, and — crucially — their fifteen-year discipline must come from the investor rather than the product. The Employees' Provident Fund pays a slightly higher rate but is only available to salaried employees through payroll. The National Savings Certificate offers a similar sovereign guarantee with a shorter five-year term but taxes interest annually in most hands. For most households the honest answer is not PPF <em>or</em> the alternatives but PPF <em>as the foundation</em>: the guaranteed, tax-free floor of the retirement plan, on top of which market-linked investments can pursue higher growth with money the family can afford to see fluctuate.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-8">Common mistakes that shrink the harvest</h3>
+    <p class="mt-3 leading-7">A few avoidable errors quietly cost PPF savers money every year. Depositing after the 5th of the month, month after month, forfeits a month of interest on every instalment. Exceeding the ₹1.5 lakh ceiling across combined accounts — your own, plus minor accounts you manage as guardian — earns no interest on the excess and invites a refund without interest. Letting the account go dormant by skipping the ₹500 minimum deposit in a year triggers a small revival fee and paperwork that a single calendar reminder prevents. Opening a second account in your own name, which the rules do not permit, risks the newer account being closed without interest. And the most expensive mistake of all: closing the account at fifteen years out of habit when no expense actually needs the money, and moving the corpus into a taxable deposit — a decision that can cost more in future tax than the extension comparison above makes vivid. Keep the account extended, keep depositing if you can, and let the tree keep growing.</p>
+    <p class="mt-3 leading-7">Finally, remember what the PPF is for. It is not a trading instrument or a get-rich-quick scheme; it is a promise you make to your future self, renewed with every deposit. Use GrowSafe whenever a decision comes up — a salary rise you could route into the account, a loan you are tempted to take, an extension you are unsure about — and let the year-by-year story show you the consequence before you commit to it. Plant early, water regularly, and give the safest tree in Indian personal finance the one thing it truly needs: time.</p>
+
+    <h3 class="font-display text-2xl font-bold text-[#14532D] mt-10">Frequently asked questions</h3>
+    <div class="mt-4 space-y-3">
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">What is the current PPF interest rate and how often does it change?</summary>
+        <p class="mt-2 leading-7 text-sm">The PPF interest rate is set by the Government of India and reviewed every quarter. It has stood at 7.1% per year for an extended recent period. Because the rate can move over a fifteen-year tenure, GrowSafe lets you test different rates so you can see a range of outcomes instead of a single fragile guess.</p>
+      </details>
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">How much can I deposit in a PPF account each year?</summary>
+        <p class="mt-2 leading-7 text-sm">You can deposit a minimum of ₹500 and a maximum of ₹1,50,000 in a financial year, in a lump sum or in up to twelve instalments. That is exactly ₹12,500 per month. Any amount above the ceiling earns no interest, so GrowSafe warns you as soon as your planned deposits cross ₹1.5 lakh in a year.</p>
+      </details>
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">When can I take a loan against my PPF balance?</summary>
+        <p class="mt-2 leading-7 text-sm">A loan is available from the third financial year of the account until the end of the sixth year. You can borrow up to 25% of the balance at the end of the second year before your application year, at an interest rate 1% above the PPF rate, repayable within 36 months. GrowSafe marks these loan-window years directly in your table.</p>
+      </details>
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">When can I make a partial withdrawal from PPF?</summary>
+        <p class="mt-2 leading-7 text-sm">Partial withdrawals are allowed once a year from the seventh financial year onwards. You may withdraw up to 50% of the balance at the end of the fourth year before the withdrawal year, and the amount is tax-free. GrowSafe shows the maximum permitted withdrawal for every eligible year in your projection.</p>
+      </details>
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">What happens when my PPF account matures after 15 years?</summary>
+        <p class="mt-2 leading-7 text-sm">At maturity you can withdraw the full amount tax-free and close the account, or extend it in blocks of five years. You may extend with fresh deposits (keeping your Section 80C benefit, if applicable) or without deposits, letting the balance keep compounding. GrowSafe compares both extension paths side by side using your own numbers.</p>
+      </details>
+      <details class="faq leaf-card p-4">
+        <summary class="font-semibold text-[#14532D]">Is PPF interest and maturity amount really tax-free?</summary>
+        <p class="mt-2 leading-7 text-sm">Yes. The PPF has EEE tax status: deposits qualify for Section 80C deduction up to the overall ₹1.5 lakh limit under the old tax regime, the interest credited each year is exempt from tax, and the maturity proceeds — including partial withdrawals — are fully tax-free. This tax treatment is a major reason its effective return beats many taxable deposits.</p>
+      </details>
+    </div>
+  </article>
+</main>
+
+<footer class="bg-[#14532D] text-[#FDF8EC] mt-6">
+  <div class="mx-auto max-w-6xl px-4 sm:px-6 py-8 flex flex-col sm:flex-row items-center justify-between gap-3">
+    <p class="font-display font-bold text-lg">🌱 GrowSafe</p>
+    <p class="text-sm opacity-80 text-center">A free PPF calculator for patient savers. Projections are estimates, not a guarantee of future rates.</p>
+    <a href="#top" class="text-sm font-medium hover:text-[#BBF7D0]">Back to top ↑</a>
+  </div>
+</footer>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "What is the current PPF interest rate and how often does it change?", "acceptedAnswer": {"@type": "Answer", "text": "The PPF interest rate is set by the Government of India and reviewed every quarter. It has stood at 7.1% per year for an extended recent period. Because the rate can move over a fifteen-year tenure, GrowSafe lets you test different rates so you can see a range of outcomes instead of a single fragile guess."}},
+    {"@type": "Question", "name": "How much can I deposit in a PPF account each year?", "acceptedAnswer": {"@type": "Answer", "text": "You can deposit a minimum of ₹500 and a maximum of ₹1,50,000 in a financial year, in a lump sum or in up to twelve instalments. That is exactly ₹12,500 per month. Any amount above the ceiling earns no interest, so GrowSafe warns you as soon as your planned deposits cross ₹1.5 lakh in a year."}},
+    {"@type": "Question", "name": "When can I take a loan against my PPF balance?", "acceptedAnswer": {"@type": "Answer", "text": "A loan is available from the third financial year of the account until the end of the sixth year. You can borrow up to 25% of the balance at the end of the second year before your application year, at an interest rate 1% above the PPF rate, repayable within 36 months. GrowSafe marks these loan-window years directly in your table."}},
+    {"@type": "Question", "name": "When can I make a partial withdrawal from PPF?", "acceptedAnswer": {"@type": "Answer", "text": "Partial withdrawals are allowed once a year from the seventh financial year onwards. You may withdraw up to 50% of the balance at the end of the fourth year before the withdrawal year, and the amount is tax-free. GrowSafe shows the maximum permitted withdrawal for every eligible year in your projection."}},
+    {"@type": "Question", "name": "What happens when my PPF account matures after 15 years?", "acceptedAnswer": {"@type": "Answer", "text": "At maturity you can withdraw the full amount tax-free and close the account, or extend it in blocks of five years. You may extend with fresh deposits (keeping your Section 80C benefit, if applicable) or without deposits, letting the balance keep compounding. GrowSafe compares both extension paths side by side using your own numbers."}},
+    {"@type": "Question", "name": "Is PPF interest and maturity amount really tax-free?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The PPF has EEE tax status: deposits qualify for Section 80C deduction up to the overall ₹1.5 lakh limit under the old tax regime, the interest credited each year is exempt from tax, and the maturity proceeds — including partial withdrawals — are fully tax-free. This tax treatment is a major reason its effective return beats many taxable deposits."}}
+  ]
+}
+</script>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var freqEl = $('freq'), amountEl = $('amount'), rateEl = $('rate'), rateRange = $('rateRange'),
+      yearsEl = $('years'), startYearEl = $('startYear'), warnEl = $('warn'), errEl = $('err');
+
+  rateEl.addEventListener('input', function () { rateRange.value = rateEl.value || 0; });
+  rateRange.addEventListener('input', function () { rateEl.value = rateRange.value; });
+  $('maxBtn').addEventListener('click', function () {
+    if (freqEl.value === 'monthly') { amountEl.value = 12500; } else { amountEl.value = 150000; }
+    calculate();
+  });
+  $('calcBtn').addEventListener('click', calculate);
+  [freqEl, yearsEl].forEach(function (el) { el.addEventListener('change', calculate); });
+
+  function buildChart(rows) {
+    var w = 640, h = 220, pad = 34;
+    var max = rows[rows.length - 1].closing || 1;
+    var pts = rows.map(function (r, i) {
+      var x = pad + (w - pad * 2) * (rows.length === 1 ? 0 : i / (rows.length - 1));
+      var y = h - pad - (h - pad * 2) * (r.closing / max);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+    var area = pad + ',' + (h - pad) + ' ' + pts + ' ' + (w - pad) + ',' + (h - pad);
+    var last = rows[rows.length - 1];
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" class="w-full" role="img" aria-label="Growth curve of PPF balance">' +
+      '<polygon points="' + area + '" fill="#BBF7D0" opacity="0.55"></polygon>' +
+      '<polyline points="' + pts + '" fill="none" stroke="#166534" stroke-width="3" stroke-linejoin="round"></polyline>' +
+      '<text x="' + pad + '" y="16" font-size="12" fill="#166534">Balance grows to ' + GrowSafeLib.formatINR(last.closing) + ' by ' + last.calendarYear + '</text>' +
+      '<text x="' + pad + '" y="' + (h - 8) + '" font-size="11" fill="#5B7263">' + rows[0].calendarYear + '</text>' +
+      '<text x="' + (w - pad - 30) + '" y="' + (h - 8) + '" font-size="11" fill="#5B7263">' + last.calendarYear + '</text></svg>';
+  }
+
+  function calculate() {
+    errEl.classList.add('hidden'); warnEl.classList.add('hidden');
+    var amount = parseFloat(amountEl.value);
+    var rate = parseFloat(rateEl.value);
+    var years = parseInt(yearsEl.value, 10);
+    var startYear = parseInt(startYearEl.value, 10) || 2026;
+    var res = GrowSafeLib.computeSchedule({ amount: amount, frequency: freqEl.value, rate: rate, years: years, startYear: startYear });
+    if (res.errors.length) {
+      errEl.textContent = 'Please fix this first: ' + res.errors.join(' ');
+      errEl.classList.remove('hidden');
+      return;
+    }
+    if (GrowSafeLib.exceedsCap(res.summary.annualDeposit)) {
+      warnEl.textContent = 'Heads up: your plan deposits ' + GrowSafeLib.formatINR(res.summary.annualDeposit) + ' per year, above the ₹1,50,000 PPF ceiling. The excess over ₹1.5 lakh earns no interest in a real account — consider lowering the deposit to stay within the limit. The projection below uses the full amount you entered.';
+      warnEl.classList.remove('hidden');
+    }
+    $('emptyState').classList.add('hidden');
+    $('maturityOut').textContent = GrowSafeLib.formatINR(res.summary.maturityValue);
+    $('depositedOut').textContent = GrowSafeLib.formatINR(res.summary.totalDeposited);
+    $('interestOut').textContent = GrowSafeLib.formatINR(res.summary.totalInterest);
+
+    $('chart').innerHTML = buildChart(res.rows);
+    $('chartWrap').classList.remove('hidden');
+
+    var html = '';
+    res.rows.forEach(function (r, idx) {
+      var badges = '';
+      if (r.loanEligible) badges += '<span class="badge-loan inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1">Loan window</span><span class="text-xs text-[#92400E]">up to ' + GrowSafeLib.formatINR(r.maxLoan) + '</span>';
+      if (r.withdrawalEligible) badges += '<span class="badge-wd inline-block px-2 py-0.5 rounded-full text-xs font-semibold mr-1">Withdrawal open</span><span class="text-xs text-[#166534]">up to ' + GrowSafeLib.formatINR(r.maxWithdrawal) + '</span>';
+      if (!badges) badges = '<span class="text-xs text-[#8AA08F]">Growing quietly</span>';
+      html += '<tr class="' + (idx % 2 ? 'bg-[#FDF8EC]' : 'bg-white') + ' border-t border-[#EFE8D2]">' +
+        '<td class="px-3 py-2 font-semibold text-[#14532D]">Year ' + r.accountYear + ' <span class="font-normal text-[#5B7263]">(' + r.calendarYear + ')</span></td>' +
+        '<td class="px-3 py-2 text-right">' + GrowSafeLib.formatINR(r.opening) + '</td>' +
+        '<td class="px-3 py-2 text-right">' + GrowSafeLib.formatINR(r.deposited) + '</td>' +
+        '<td class="px-3 py-2 text-right text-[#166534] font-medium">' + GrowSafeLib.formatINR(r.interest) + '</td>' +
+        '<td class="px-3 py-2 text-right font-semibold">' + GrowSafeLib.formatINR(r.closing) + '</td>' +
+        '<td class="px-3 py-2">' + badges + '</td></tr>';
+    });
+    $('tableBody').innerHTML = html;
+    $('tableWrap').classList.remove('hidden');
+
+    var withC = GrowSafeLib.extensionScenario(res.summary.maturityValue, rate, res.summary.annualDeposit, 5, true);
+    var withoutC = GrowSafeLib.extensionScenario(res.summary.maturityValue, rate, res.summary.annualDeposit, 5, false);
+    $('extWithOut').textContent = GrowSafeLib.formatINR(withC.finalBalance);
+    $('extWithDetail').textContent = 'After 5 more years of depositing ' + GrowSafeLib.formatINR(res.summary.annualDeposit) + ' a year (' + GrowSafeLib.formatINR(withC.totalDeposited) + ' fresh deposits) plus ' + GrowSafeLib.formatINR(withC.interestEarned) + ' of new interest.';
+    $('extWithoutOut').textContent = GrowSafeLib.formatINR(withoutC.finalBalance);
+    $('extWithoutDetail').textContent = 'No new deposits at all — your existing balance alone earns ' + GrowSafeLib.formatINR(withoutC.interestEarned) + ' of interest over the 5-year extension block.';
+    $('extVerdict').textContent = 'Keeping the deposits going leaves you ' + GrowSafeLib.formatINR(withC.finalBalance - withoutC.finalBalance) + ' ahead after one extension block — and the gap widens with every block after that.';
+    $('extWrap').classList.remove('hidden');
+  }
+})();
+</script>
+</body>
+</html>
